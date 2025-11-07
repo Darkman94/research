@@ -24,7 +24,20 @@ research/
 ## Research Projects
 
 <!-- PROJECT_LIST_START -->
-*No projects yet. Each new research project will be automatically listed here.*
+
+### [Python Memory Allocation Investigation](projects/python-memory-allocation/)
+
+An in-depth study of how frequently common Python operations engage in memory allocations, inspired by [this blog post](https://zackoverflow.dev/writing/how-often-does-python-allocate).
+
+**Key Findings:**
+- Small integers (-5 to 256) are pre-allocated singletons
+- Most "allocations" are satisfied by freelists, avoiding malloc() calls
+- String operations allocate due to immutability
+- Container growth (lists/dicts) allocates ~1x per iteration when growing
+- Python's optimization strategies (caching, freelists, pymalloc) make allocation overhead minimal
+
+**Tools Used:** tracemalloc, object identity tracking, bytecode analysis, performance benchmarking
+
 <!-- PROJECT_LIST_END -->
 
 ## Getting Started
