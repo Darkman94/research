@@ -1,0 +1,3 @@
+# Project-specific dependencies
+# Add any additional packages needed for this research project
+pytest>=7.0.0

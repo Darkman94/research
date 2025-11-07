@@ -1,0 +1,21 @@
+# Core dependencies for research projects
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Data analysis and visualization
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Code quality
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# Documentation
+jupyter>=1.0.0

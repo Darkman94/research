@@ -1,0 +1,117 @@
+name: Update README with Project List
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'projects/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate project list
+        run: |
+          python3 << 'EOF'
+          import os
+          import re
+          from pathlib import Path
+          from datetime import datetime
+
+          def extract_metadata(readme_path):
+              """Extract metadata from project README."""
+              try:
+                  with open(readme_path, 'r') as f:
+                      content = f.read()
+
+                  # Extract research question
+                  question_match = re.search(r'\*\*Research Question\*\*:\s*(.+?)(?:\n|$)', content)
+                  question = question_match.group(1).strip() if question_match else "No description"
+
+                  # Extract status
+                  status_match = re.search(r'\*\*Status\*\*:\s*(.+?)(?:\n|$)', content)
+                  status = status_match.group(1).strip() if status_match else "Unknown"
+
+                  # Extract date
+                  date_match = re.search(r'\*\*Date Started\*\*:\s*(.+?)(?:\n|$)', content)
+                  date = date_match.group(1).strip() if date_match else "Unknown"
+
+                  return question, status, date
+              except Exception as e:
+                  return "No description available", "Unknown", "Unknown"
+
+          # Find all project directories
+          projects_dir = Path('projects')
+          if not projects_dir.exists():
+              print("No projects directory found")
+              exit(0)
+
+          projects = []
+          for project_dir in sorted(projects_dir.iterdir()):
+              if project_dir.is_dir() and not project_dir.name.startswith('.'):
+                  readme_path = project_dir / 'README.md'
+                  if readme_path.exists():
+                      question, status, date = extract_metadata(readme_path)
+                      projects.append({
+                          'name': project_dir.name,
+                          'question': question,
+                          'status': status,
+                          'date': date,
+                          'path': str(project_dir)
+                      })
+
+          # Generate markdown list
+          if not projects:
+              project_list = "*No projects yet. Each new research project will be automatically listed here.*\n"
+          else:
+              project_list = ""
+              for project in projects:
+                  project_list += f"### [{project['name']}]({project['path']})\n\n"
+                  project_list += f"**Status**: {project['status']} | **Started**: {project['date']}\n\n"
+                  project_list += f"{project['question']}\n\n"
+
+          # Read current README
+          readme_path = Path('README.md')
+          with open(readme_path, 'r') as f:
+              readme_content = f.read()
+
+          # Replace project list section
+          pattern = r'<!-- PROJECT_LIST_START -->.*?<!-- PROJECT_LIST_END -->'
+          replacement = f'<!-- PROJECT_LIST_START -->\n{project_list}<!-- PROJECT_LIST_END -->'
+
+          updated_content = re.sub(pattern, replacement, readme_content, flags=re.DOTALL)
+
+          # Write updated README
+          with open(readme_path, 'w') as f:
+              f.write(updated_content)
+
+          print(f"Updated README with {len(projects)} project(s)")
+          EOF
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update README with project list [skip ci]"
+            git push
+          fi
