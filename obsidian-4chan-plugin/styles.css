@@ -1,0 +1,16 @@
+/* Optional styles for the plugin */
+
+/* Style for the modal */
+.fourchan-modal {
+    padding: 20px;
+}
+
+/* Style for thread content */
+.fourchan-thread {
+    line-height: 1.6;
+}
+
+/* Style for greentext (if needed) */
+.fourchan-greentext {
+    color: var(--text-success);
+}

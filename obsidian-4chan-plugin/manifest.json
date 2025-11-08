@@ -1,0 +1,10 @@
+{
+	"id": "4chan-post-grabber",
+	"name": "4chan Post Grabber",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Fetches 4chan threads and saves them as Obsidian notes",
+	"author": "Research",
+	"authorUrl": "https://github.com/Darkman94/research",
+	"isDesktopOnly": false
+}
