@@ -24,7 +24,8 @@ research/
 ## Research Projects
 
 <!-- PROJECT_LIST_START -->
-*No projects yet. Each new research project will be automatically listed here.*
+### [Bodyweight Kalman Filter](projects/bodyweight-kalman-filter/)
+A Python tool that pulls bodyweight data from Google Sheets and applies a Kalman filter to identify the "true" bodyweight by filtering out random daily fluctuations. Includes Google Sheets API integration, statistical filtering, and visualization.
 <!-- PROJECT_LIST_END -->
 
 ## Getting Started
