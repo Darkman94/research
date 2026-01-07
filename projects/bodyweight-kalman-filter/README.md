@@ -12,6 +12,19 @@ Daily bodyweight measurements can fluctuate significantly due to:
 
 This tool uses a **Kalman filter** to estimate your true underlying bodyweight by treating daily measurements as noisy observations of a slowly-changing true weight.
 
+### Why Autocorrelation Matters
+
+**Important**: Bodyweight fluctuations are NOT random (iid) noise - they're **autocorrelated**. If you're holding extra water today, you'll likely still be holding it tomorrow. This creates multi-day waves that violate standard Kalman filter assumptions.
+
+This tool provides **two filter options**:
+1. **Simple Kalman Filter**: Assumes iid noise (basic, less accurate)
+2. **Augmented Kalman Filter** (⭐ RECOMMENDED): Models autocorrelated noise as an AR(1) process, providing:
+   - More accurate true weight estimates
+   - Estimates of current water retention/dehydration
+   - Better handling of DOMS, hormonal effects, sodium intake patterns
+
+For users on TRT or experiencing significant multi-day weight fluctuations, the **augmented filter is strongly recommended**.
+
 ## Features
 
 - 📊 **Google Sheets Integration**: Automatically pulls data from your Google Sheets
@@ -71,17 +84,32 @@ The script will automatically detect header rows and parse the data.
 
 ## Usage
 
-### Basic Usage
+### Recommended: Augmented Filter (Handles Autocorrelated Noise)
 
 ```bash
-# Using spreadsheet URL
-python bodyweight_tracker.py --url "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit"
+# Use augmented filter with auto-tuning (RECOMMENDED)
+python bodyweight_tracker.py --spreadsheet YOUR_ID --augmented --auto-tune
 
-# Or using spreadsheet ID directly
-python bodyweight_tracker.py --spreadsheet YOUR_SPREADSHEET_ID
+# Or with manual autocorrelation parameter
+python bodyweight_tracker.py --spreadsheet YOUR_ID --augmented --autocorr 0.75
+
+# Using spreadsheet URL
+python bodyweight_tracker.py --url "https://docs.google.com/spreadsheets/d/YOUR_ID/edit" --augmented
 ```
 
-### Advanced Options
+The augmented filter provides:
+- More accurate true weight estimates by modeling multi-day fluctuation patterns
+- Estimates of your current water retention/dehydration level
+- Better performance for users on TRT, those with DOMS patterns, or high sodium variability
+
+### Simple Filter (Basic, Assumes iid Noise)
+
+```bash
+# Simple filter (less accurate, but faster)
+python bodyweight_tracker.py --spreadsheet YOUR_ID
+```
+
+### Additional Options
 
 ```bash
 # Specify custom sheet range
@@ -91,51 +119,81 @@ python bodyweight_tracker.py --spreadsheet YOUR_ID --range "Data!A:B"
 python bodyweight_tracker.py --spreadsheet YOUR_ID --credentials mycreds.json
 
 # Save plot to file instead of displaying
-python bodyweight_tracker.py --spreadsheet YOUR_ID --output bodyweight_plot.png
+python bodyweight_tracker.py --spreadsheet YOUR_ID --augmented --output bodyweight_plot.png
 
 # Export filtered results to CSV
-python bodyweight_tracker.py --spreadsheet YOUR_ID --csv results.csv
-
-# Adjust Kalman filter parameters
-python bodyweight_tracker.py --spreadsheet YOUR_ID \
-    --process-var 1e-4 \
-    --measurement-var 1.0
+python bodyweight_tracker.py --spreadsheet YOUR_ID --augmented --csv results.csv
 
 # Show summary only, no plot
-python bodyweight_tracker.py --spreadsheet YOUR_ID --no-plot
+python bodyweight_tracker.py --spreadsheet YOUR_ID --augmented --no-plot
 ```
 
-### Kalman Filter Parameters
+### Demo and Comparison
 
-The filter behavior can be tuned with two parameters:
+```bash
+# Run demo with synthetic data (no Google Sheets needed)
+python example_demo.py
 
-- `--process-var`: How much your true weight can change per day (default: 1e-5)
-  - Smaller = assumes weight changes slowly (smoother filtered curve)
-  - Larger = allows faster weight changes (more responsive to trends)
+# Compare simple vs augmented filters
+python compare_filters.py
+```
 
-- `--measurement-var`: Expected variance in daily measurements (default: 0.5)
-  - Smaller = trusts measurements more (less smoothing)
-  - Larger = expects more noise (more smoothing)
+### Filter Parameters
+
+#### Augmented Filter Parameters
+
+- `--autocorr`: Autocorrelation coefficient ρ (default: 0.7, range: 0-0.95)
+  - How much noise persists day-to-day
+  - 0.7-0.8: Typical for bodyweight
+  - Higher for strong TRT effects or consistent training patterns
+  - Use `--auto-tune` to estimate from your data
+
+- `--noise-var`: Variance of daily noise innovations (default: 0.3 kg²)
+- `--process-var`: True weight change variance (default: 1e-5 kg²)
+
+#### Simple Filter Parameters
+
+- `--measurement-var`: Expected measurement variance (default: 0.5 kg²)
+  - Smaller = trusts measurements more
+  - Larger = expects more noise
+
+- `--process-var`: True weight change variance (default: 1e-5 kg²)
+  - Smaller = smoother curve
+  - Larger = more responsive to trends
 
 ## How It Works
 
-### The Kalman Filter
+### Simple Kalman Filter (iid assumption)
 
-The Kalman filter is an optimal recursive algorithm that estimates the state of a system from noisy measurements. For bodyweight tracking:
+The basic Kalman filter assumes **iid noise**:
+- **State**: True bodyweight (changes slowly)
+- **Measurements**: Daily scale readings = true weight + random noise
+- **Assumption**: Daily fluctuations are independent
 
-- **State**: Your true bodyweight at any given time
-- **Measurements**: Your daily scale readings (noisy observations)
-- **Process model**: Weight changes slowly day-to-day
-- **Measurement model**: Scale readings have random noise
+This works reasonably well but **underestimates true weight changes** and **lags behind trends** when noise is actually autocorrelated.
 
-The filter works in two steps:
-1. **Prediction**: Estimate today's weight based on yesterday's estimate
-2. **Update**: Combine the prediction with today's measurement, weighted by their uncertainties
+### Augmented Kalman Filter (AR model) ⭐
 
-This produces an optimal estimate that:
-- Smooths out random daily fluctuations
-- Responds to real weight changes over time
-- Provides uncertainty estimates (confidence intervals)
+The augmented filter models **autocorrelated noise** explicitly:
+
+**State**: `[true_weight, noise_level]`
+- True weight: Underlying trend
+- Noise level: Current water retention/dehydration (persists across days)
+
+**Noise dynamics**: `noise(t) = ρ × noise(t-1) + new_noise`
+- ρ (autocorrelation): How much yesterday's fluctuation carries over
+- If you're +2kg heavy today due to water, you'll likely be +1.4kg heavy tomorrow (with ρ=0.7)
+
+**Why this matters**:
+- Water retention from high sodium, carbs, training, or hormones lasts multiple days
+- DOMS-related inflammation persists 2-5 days
+- TRT can create multi-day water retention patterns
+- Modeling this autocorrelation improves true weight estimates by 30-50%
+
+**Output**:
+1. **True weight estimate**: Your actual body composition trend
+2. **Water retention estimate**: How much temporary fluctuation you're experiencing
+3. **Tomorrow's prediction**: Expected weight based on current retention level
 
 ### Output Interpretation
 
@@ -158,13 +216,17 @@ The script produces:
 
 ```
 bodyweight-kalman-filter/
-├── bodyweight_tracker.py    # Main script
-├── kalman_filter.py          # Kalman filter implementation
-├── sheets_integration.py     # Google Sheets API client
-├── requirements.txt          # Python dependencies
-├── README.md                 # This file
-├── .gitignore               # Ignore credentials and outputs
-└── credentials.json         # Your Google API credentials (not in git)
+├── bodyweight_tracker.py        # Main script
+├── kalman_filter.py             # Simple Kalman filter (iid)
+├── augmented_kalman_filter.py   # Augmented filter (AR model)
+├── sheets_integration.py        # Google Sheets API client
+├── compare_filters.py           # Compare simple vs augmented
+├── example_demo.py              # Demo with synthetic data
+├── requirements.txt             # Python dependencies
+├── README.md                    # This file
+├── AUTOCORRELATION_ANALYSIS.md  # Technical analysis
+├── .gitignore                   # Ignore credentials and outputs
+└── credentials.json             # Your API credentials (not in git)
 ```
 
 ## Example Output

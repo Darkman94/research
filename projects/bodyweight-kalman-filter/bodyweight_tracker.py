@@ -14,48 +14,92 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from kalman_filter import BodyweightKalmanFilter
+from augmented_kalman_filter import AugmentedBodyweightKalmanFilter, auto_tune_filter
 from sheets_integration import GoogleSheetsClient, get_spreadsheet_id_from_url
 
 
-def plot_results(data: pd.DataFrame, results: dict, output_path: str = None):
+def plot_results(data: pd.DataFrame, results: dict, output_path: str = None,
+                 is_augmented: bool = False):
     """
     Create a visualization of the raw and filtered bodyweight data.
 
     Args:
         data: DataFrame with date and weight columns
-        results: Dictionary from BodyweightKalmanFilter.get_results()
+        results: Dictionary from filter.get_results()
         output_path: Optional path to save the plot
+        is_augmented: Whether this is from augmented filter
     """
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-
     dates = data['date'].values
 
-    # Top plot: Raw measurements vs filtered estimate
-    ax1.plot(dates, results['measurements'], 'o-', alpha=0.5,
-             label='Raw measurements', color='lightblue', markersize=4)
-    ax1.plot(dates, results['filtered'], '-', linewidth=2,
-             label='Filtered estimate (true weight)', color='darkblue')
+    if is_augmented:
+        # Three-panel plot for augmented filter
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 
-    # Add confidence interval
-    ax1.fill_between(dates,
-                     results['filtered'] - 2 * results['errors'],
-                     results['filtered'] + 2 * results['errors'],
-                     alpha=0.2, color='darkblue',
-                     label='95% confidence interval')
+        # Top: measurements and true weight estimate
+        ax1.plot(dates, results['measurements'], 'o-', alpha=0.5,
+                label='Raw measurements', color='lightblue', markersize=4)
+        ax1.plot(dates, results['true_weight'], '-', linewidth=2,
+                label='True weight estimate', color='darkblue')
+        ax1.fill_between(dates,
+                        results['true_weight'] - 2 * results['true_weight_std'],
+                        results['true_weight'] + 2 * results['true_weight_std'],
+                        alpha=0.2, color='darkblue',
+                        label='95% confidence interval')
+        ax1.set_ylabel('Weight (kg)')
+        ax1.set_title('Bodyweight Tracking with Augmented Kalman Filter (AR Model)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
 
-    ax1.set_ylabel('Weight (kg)')
-    ax1.set_title('Bodyweight Tracking with Kalman Filter')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+        # Middle: water retention / noise estimate
+        ax2.plot(dates, results['noise'], '-', linewidth=2, color='purple')
+        ax2.fill_between(dates, 0, results['noise'],
+                        where=results['noise']>0,
+                        alpha=0.3, color='red', label='Water retention')
+        ax2.fill_between(dates, 0, results['noise'],
+                        where=results['noise']<0,
+                        alpha=0.3, color='blue', label='Dehydration')
+        ax2.axhline(y=0, color='black', linestyle='--', linewidth=1)
+        ax2.set_ylabel('Noise Level (kg)')
+        ax2.set_title('Estimated Water Retention / Temporary Fluctuations')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
 
-    # Bottom plot: Measurement residuals (noise)
-    residuals = results['measurements'] - results['filtered']
-    ax2.plot(dates, residuals, 'o-', alpha=0.6, color='coral', markersize=4)
-    ax2.axhline(y=0, color='black', linestyle='--', linewidth=1)
-    ax2.set_xlabel('Date')
-    ax2.set_ylabel('Residual (kg)')
-    ax2.set_title('Daily Fluctuations (Measurement - True Weight)')
-    ax2.grid(True, alpha=0.3)
+        # Bottom: residuals
+        residuals = results['measurements'] - results['true_weight']
+        ax3.plot(dates, residuals, 'o-', alpha=0.6, color='coral', markersize=4)
+        ax3.axhline(y=0, color='black', linestyle='--', linewidth=1)
+        ax3.set_xlabel('Date')
+        ax3.set_ylabel('Residual (kg)')
+        ax3.set_title('Measurement - True Weight')
+        ax3.grid(True, alpha=0.3)
+
+    else:
+        # Two-panel plot for simple filter
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+        # Top: measurements and filtered estimate
+        ax1.plot(dates, results['measurements'], 'o-', alpha=0.5,
+                label='Raw measurements', color='lightblue', markersize=4)
+        ax1.plot(dates, results['filtered'], '-', linewidth=2,
+                label='Filtered estimate (true weight)', color='darkblue')
+        ax1.fill_between(dates,
+                        results['filtered'] - 2 * results['errors'],
+                        results['filtered'] + 2 * results['errors'],
+                        alpha=0.2, color='darkblue',
+                        label='95% confidence interval')
+        ax1.set_ylabel('Weight (kg)')
+        ax1.set_title('Bodyweight Tracking with Simple Kalman Filter')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Bottom: residuals
+        residuals = results['measurements'] - results['filtered']
+        ax2.plot(dates, residuals, 'o-', alpha=0.6, color='coral', markersize=4)
+        ax2.axhline(y=0, color='black', linestyle='--', linewidth=1)
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Residual (kg)')
+        ax2.set_title('Daily Fluctuations (Measurement - True Weight)')
+        ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
@@ -66,30 +110,50 @@ def plot_results(data: pd.DataFrame, results: dict, output_path: str = None):
         plt.show()
 
 
-def print_summary(results: dict, data: pd.DataFrame):
+def print_summary(results: dict, data: pd.DataFrame, is_augmented: bool = False):
     """Print a summary of the results."""
-    current_estimate = results['filtered'][-1]
-    current_error = results['errors'][-1]
     latest_measurement = results['measurements'][-1]
+
+    if is_augmented:
+        current_estimate = results['true_weight'][-1]
+        current_error = results['true_weight_std'][-1]
+        current_noise = results['noise'][-1]
+        weight_change = results['true_weight'][-1] - results['true_weight'][0]
+        avg_residual = abs(results['measurements'] - results['true_weight']).mean()
+    else:
+        current_estimate = results['filtered'][-1]
+        current_error = results['errors'][-1]
+        weight_change = results['filtered'][-1] - results['filtered'][0]
+        avg_residual = abs(results['measurements'] - results['filtered']).mean()
 
     print("\n" + "="*60)
     print("BODYWEIGHT TRACKING SUMMARY")
     print("="*60)
+    print(f"Filter type: {'Augmented (AR model)' if is_augmented else 'Simple (iid)'}")
     print(f"Total measurements: {len(results['measurements'])}")
     print(f"Date range: {data['date'].min().strftime('%Y-%m-%d')} to "
           f"{data['date'].max().strftime('%Y-%m-%d')}")
     print()
     print(f"Latest measurement:    {latest_measurement:.2f} kg")
     print(f"Estimated true weight: {current_estimate:.2f} ± {current_error:.2f} kg")
-    print(f"Daily fluctuation:     {latest_measurement - current_estimate:+.2f} kg")
+
+    if is_augmented:
+        print(f"Estimated water retention: {current_noise:+.2f} kg")
+        if current_noise > 0.3:
+            print(f"  → Currently holding ~{current_noise:.1f} kg extra water")
+        elif current_noise < -0.3:
+            print(f"  → Currently ~{-current_noise:.1f} kg dehydrated")
+        else:
+            print(f"  → Near baseline hydration")
+    else:
+        print(f"Daily fluctuation:     {latest_measurement - current_estimate:+.2f} kg")
+
     print()
 
     # Calculate statistics
-    avg_noise = abs(results['measurements'] - results['filtered']).mean()
-    weight_change = results['filtered'][-1] - results['filtered'][0]
     days = (data['date'].max() - data['date'].min()).days
 
-    print(f"Average daily fluctuation: ±{avg_noise:.2f} kg")
+    print(f"Average daily fluctuation: ±{avg_residual:.2f} kg")
     print(f"Total weight change: {weight_change:+.2f} kg over {days} days")
     if days > 0:
         print(f"Average rate: {weight_change / days * 7:+.3f} kg/week")
@@ -109,14 +173,23 @@ Examples:
   # Using spreadsheet URL:
   %(prog)s --url "https://docs.google.com/spreadsheets/d/YOUR_ID/edit"
 
+  # Use augmented filter (handles autocorrelated noise - RECOMMENDED):
+  %(prog)s --spreadsheet YOUR_ID --augmented
+
+  # Auto-tune augmented filter from data:
+  %(prog)s --spreadsheet YOUR_ID --augmented --auto-tune
+
   # Specify custom range and credentials:
   %(prog)s --spreadsheet YOUR_ID --range "Data!A:B" --credentials mycreds.json
 
   # Save output plot:
   %(prog)s --spreadsheet YOUR_ID --output bodyweight_plot.png
 
-  # Adjust filter parameters:
+  # Adjust simple filter parameters:
   %(prog)s --spreadsheet YOUR_ID --process-var 1e-4 --measurement-var 1.0
+
+  # Adjust augmented filter autocorrelation:
+  %(prog)s --spreadsheet YOUR_ID --augmented --autocorr 0.8
         """)
 
     parser.add_argument('--spreadsheet', '-s', type=str,
@@ -131,10 +204,18 @@ Examples:
                        help='Path to store auth token (default: token.json)')
     parser.add_argument('--output', '-o', type=str,
                        help='Path to save output plot (if not specified, displays plot)')
+    parser.add_argument('--augmented', '-a', action='store_true',
+                       help='Use augmented Kalman filter (models autocorrelated noise)')
+    parser.add_argument('--auto-tune', action='store_true',
+                       help='Auto-tune filter parameters from data (requires --augmented)')
+    parser.add_argument('--autocorr', type=float, default=0.7,
+                       help='Autocorrelation coefficient for augmented filter (default: 0.7)')
     parser.add_argument('--process-var', type=float, default=1e-5,
                        help='Process variance for Kalman filter (default: 1e-5)')
     parser.add_argument('--measurement-var', type=float, default=0.5,
-                       help='Measurement variance for Kalman filter (default: 0.5)')
+                       help='Measurement variance for simple filter (default: 0.5)')
+    parser.add_argument('--noise-var', type=float, default=0.3,
+                       help='Noise variance for augmented filter (default: 0.3)')
     parser.add_argument('--no-plot', action='store_true',
                        help='Skip plotting, only show summary')
     parser.add_argument('--csv', type=str,
@@ -165,36 +246,62 @@ Examples:
         data = client.get_bodyweight_data(spreadsheet_id, args.range)
         print(f"Loaded {len(data)} measurements")
 
-        # Initialize Kalman filter
-        kf = BodyweightKalmanFilter(
-            process_variance=args.process_var,
-            measurement_variance=args.measurement_var
-        )
+        # Initialize and run Kalman filter
+        if args.augmented:
+            if args.auto_tune:
+                print("Auto-tuning augmented Kalman filter from data...")
+                kf = auto_tune_filter(data['weight'].values)
+            else:
+                print("Applying augmented Kalman filter (AR noise model)...")
+                kf = AugmentedBodyweightKalmanFilter(
+                    autocorrelation=args.autocorr,
+                    process_variance=args.process_var,
+                    noise_variance=args.noise_var
+                )
+                print(f"  Autocorrelation: {args.autocorr}")
+                print(f"  Process variance: {args.process_var}")
+                print(f"  Noise variance: {args.noise_var}")
 
-        # Process measurements
-        print("Applying Kalman filter...")
-        kf.batch_filter(data['weight'].values)
-        results = kf.get_results()
+            kf.batch_filter(data['weight'].values)
+            results = kf.get_results()
+        else:
+            print("Applying simple Kalman filter (iid assumption)...")
+            kf = BodyweightKalmanFilter(
+                process_variance=args.process_var,
+                measurement_variance=args.measurement_var
+            )
+            kf.batch_filter(data['weight'].values)
+            results = kf.get_results()
 
         # Print summary
-        print_summary(results, data)
+        print_summary(results, data, is_augmented=args.augmented)
 
         # Export to CSV if requested
         if args.csv:
-            output_df = pd.DataFrame({
-                'date': data['date'],
-                'raw_weight': results['measurements'],
-                'filtered_weight': results['filtered'],
-                'std_error': results['errors'],
-                'residual': results['measurements'] - results['filtered']
-            })
+            if args.augmented:
+                output_df = pd.DataFrame({
+                    'date': data['date'],
+                    'raw_weight': results['measurements'],
+                    'true_weight': results['true_weight'],
+                    'water_retention': results['noise'],
+                    'true_weight_std': results['true_weight_std'],
+                    'residual': results['measurements'] - results['true_weight']
+                })
+            else:
+                output_df = pd.DataFrame({
+                    'date': data['date'],
+                    'raw_weight': results['measurements'],
+                    'filtered_weight': results['filtered'],
+                    'std_error': results['errors'],
+                    'residual': results['measurements'] - results['filtered']
+                })
             output_df.to_csv(args.csv, index=False)
             print(f"Results exported to {args.csv}")
 
         # Plot results
         if not args.no_plot:
             print("Generating plot...")
-            plot_results(data, results, args.output)
+            plot_results(data, results, args.output, is_augmented=args.augmented)
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
