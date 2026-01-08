@@ -37,11 +37,11 @@ print(f"  Total change: {true_weights[-1] - true_weights[0]:.2f} kg over {days} 
 print(f"  Noise autocorrelation: {rho:.2f}")
 
 # Apply velocity filter
+# For constant velocity trend, use small acceleration variance
 print(f"\nApplying velocity Kalman filter...")
 kf = VelocityBodyweightKalmanFilter(
     autocorrelation=rho,
-    weight_process_variance=1e-6,
-    velocity_process_variance=1e-5,
+    acceleration_variance=1e-6,  # Small: allows slight velocity adaptation
     noise_variance=noise_std**2 * (1 - rho**2),
     measurement_noise=0.01
 )

@@ -341,15 +341,14 @@ Examples:
                 print("Applying velocity Kalman filter (trend + AR noise model)...")
                 kf = VelocityBodyweightKalmanFilter(
                     autocorrelation=args.autocorr,
-                    weight_process_variance=1e-6,
-                    velocity_process_variance=args.process_var,
+                    acceleration_variance=args.process_var,
                     noise_variance=args.noise_var,
                     measurement_noise=args.measurement_noise
                 )
                 print(f"  Autocorrelation: {args.autocorr}")
-                print(f"  Velocity process variance: {args.process_var}")
-                print(f"  AR(1) innovation variance: {args.noise_var}")
-                print(f"  Measurement noise (R): {args.measurement_noise}")
+                print(f"  Acceleration variance: {args.process_var} (kg/day²)²")
+                print(f"  AR(1) innovation variance: {args.noise_var} kg²")
+                print(f"  Measurement noise (R): {args.measurement_noise} kg²")
 
             kf.batch_filter(data['weight'].values)
             results = kf.get_results()
