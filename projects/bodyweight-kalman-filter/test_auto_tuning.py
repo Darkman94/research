@@ -12,14 +12,14 @@ import numpy as np
 from velocity_kalman_filter import VelocityBodyweightKalmanFilter, auto_tune_velocity_filter
 
 
-def generate_data(days, true_weight_start, velocity, rho, noise_std, seed=42):
-    """Generate synthetic bodyweight data with AR(1) noise."""
+def generate_data(days, true_weight_start, velocity, rho, noise_std, measurement_noise_std=0.1, seed=42):
+    """Generate synthetic bodyweight data with AR(1) noise + measurement noise."""
     np.random.seed(seed)
 
     # True weights (linear trend)
     true_weights = true_weight_start + velocity * np.arange(days)
 
-    # Generate AR(1) noise
+    # Generate AR(1) noise (water/glycogen/DOMS)
     noise = np.zeros(days)
     for i in range(days):
         if i == 0:
@@ -27,7 +27,10 @@ def generate_data(days, true_weight_start, velocity, rho, noise_std, seed=42):
         else:
             noise[i] = rho * noise[i-1] + np.random.normal(0, noise_std * np.sqrt(1 - rho**2))
 
-    measurements = true_weights + noise
+    # Add independent measurement noise (scale error + protocol variation)
+    measurement_noise = np.random.normal(0, measurement_noise_std, days)
+    measurements = true_weights + noise + measurement_noise
+
     return true_weights, noise, measurements
 
 
@@ -46,7 +49,8 @@ def test_phase(phase_name, days, velocity, rho, noise_std):
     print(f"  Days: {days}")
     print(f"  Velocity: {velocity * 7:.3f} kg/week")
     print(f"  Autocorrelation (ρ): {rho:.2f}")
-    print(f"  Noise std: {noise_std:.2f} kg")
+    print(f"  AR(1) noise std: {noise_std:.2f} kg")
+    print(f"  Measurement noise (R): 0.01 kg² (0.1 kg std)")
     print(f"  Total change: {true_weights[-1] - true_weights[0]:.2f} kg")
 
     # Auto-tune
@@ -141,8 +145,9 @@ def main():
     print("\nRobust auto-tuning features verified:")
     print("  ✓ AR(1) regression with intercept for ρ estimation")
     print("  ✓ Innovation variance from regression residuals")
-    print("  ✓ Grid search MLE for acceleration variance")
-    print("  ✓ MAD-based R estimation from data")
+    print("  ✓ 2D grid search MLE for (σ_a², R) jointly")
+    print("  ✓ Detrended MAD for R initialization")
+    print("  ✓ Coarse-then-fine grid refinement")
     print("  ✓ Works across maintenance, cutting, and bulking phases")
     print("  ✓ Handles different autocorrelation levels")
     print(f"{'='*70}")

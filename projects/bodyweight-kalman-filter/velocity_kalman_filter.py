@@ -272,11 +272,13 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
 
     Uses robust methods:
     - ρ, σ_u²: AR(1) regression with intercept on detrended residuals
-    - σ_a²: Grid search over log-spaced values using log-likelihood
-    - R: Estimated from MAD of day-to-day differences
+    - σ_a², R: Joint 2D grid search using log-likelihood (coarse-then-fine)
 
-    This avoids fragile smoothing heuristics and hard clamps that fail
-    across diet phases.
+    Key improvements:
+    - Detrends BEFORE estimating R (avoids bias from real drift)
+    - Joint optimization of (σ_a², R) avoids compensation artifacts
+    - Coarse-then-fine grid search for better resolution
+    - Softer handling of edge cases (warns instead of hard overrides)
 
     Args:
         measurements: Array of bodyweight measurements
@@ -298,18 +300,7 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
             initial_noise=0.0
         )
 
-    # Step 1: Estimate R from high-frequency component (MAD of differences)
-    # This captures scale error + protocol variation
-    diffs = np.diff(measurements)
-    # MAD is robust to outliers
-    mad = np.median(np.abs(diffs - np.median(diffs)))
-    # Convert MAD to std (for normal distribution: std ≈ 1.4826 * MAD)
-    # For differences: Var(diff) ≈ 2*R if pure measurement noise
-    R_estimate = (1.4826 * mad) ** 2 / 2
-    # Clamp to reasonable range
-    R_estimate = np.clip(R_estimate, 0.001, 0.1)  # 0.03-0.32 kg std
-
-    # Step 2: Detrend to get residuals
+    # Step 1: Detrend to get residuals FIRST
     # Use linear regression to remove trend (preserves autocorrelation better than MA)
     # IMPORTANT: Use dt * np.arange(...) for correct scale
     t = dt * np.arange(len(measurements))
@@ -318,6 +309,17 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
     coeffs = np.linalg.lstsq(A, measurements, rcond=None)[0]
     trend = coeffs[0] + coeffs[1] * t
     residuals = measurements - trend
+
+    # Step 2: Estimate R from detrended residuals (MAD of differences)
+    # Detrending first avoids bias from real drift
+    resid_diffs = np.diff(residuals)
+    # MAD is robust to outliers
+    mad = np.median(np.abs(resid_diffs - np.median(resid_diffs)))
+    # Convert MAD to std (for normal distribution: std ≈ 1.4826 * MAD)
+    # For differences: Var(diff) ≈ 2*R if pure measurement noise
+    R_initial = (1.4826 * mad) ** 2 / 2
+    # Clamp to reasonable range (but this is just initial - will be optimized)
+    R_initial = np.clip(R_initial, 0.001, 0.1)  # 0.03-0.32 kg std
 
     # Step 3: Fit AR(1) with intercept: u_t = c + ρ*u_{t-1} + e_t
     # Intercept improves robustness to systematic offsets (morning drift, scale placement, etc.)
@@ -341,7 +343,7 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
     else:
         # Sanity checks
         if rho < -0.3:
-            print(f"  Warning: Negative AR(1) coefficient ({rho:.3f}) - may indicate issues")
+            print(f"  Warning: Negative AR(1) coefficient ({rho:.3f}) - may indicate model issues")
         if rho > 0.98:
             print(f"  Warning: Very high AR(1) coefficient ({rho:.3f}), clamping to 0.95")
             rho = 0.95
@@ -352,22 +354,24 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
         innovations = u_t - intercept - rho * u_tm1
         noise_var = np.var(innovations)
 
-        # Sanity check
-        if noise_var < 0.01:
-            print(f"  Warning: Estimated AR(1) innovation variance very small ({noise_var:.4f}), using 0.1")
-            noise_var = 0.1
+        # Softer handling of small noise_var
+        if noise_var < 0.001:
+            print(f"  Warning: Estimated AR(1) innovation variance extremely small ({noise_var:.6f}), setting to 0.01")
+            noise_var = 0.01
+        elif noise_var < 0.01:
+            print(f"  Note: Small AR(1) innovation variance ({noise_var:.4f}) - may indicate very consistent weigh-ins")
 
-    # Step 4: Tune acceleration variance via grid search using log-likelihood
-    # This is more principled than ad-hoc variance ratio scaling
-    print("  Running grid search for acceleration variance...")
+    # Step 4: 2D grid search for (σ_a², R) using log-likelihood
+    # Joint optimization avoids compensation artifacts
+    print("  Running 2D grid search for (σ_a², R)...")
 
-    def compute_log_likelihood(accel_var_candidate):
-        """Compute log-likelihood for a given acceleration variance."""
+    def compute_log_likelihood(accel_var_candidate, R_candidate):
+        """Compute log-likelihood for given (σ_a², R) pair."""
         kf_test = VelocityBodyweightKalmanFilter(
             autocorrelation=rho,
             acceleration_variance=accel_var_candidate,
             noise_variance=noise_var,
-            measurement_noise=R_estimate,
+            measurement_noise=R_candidate,
             dt=dt,
             initial_weight=measurements[0],
             initial_velocity=0.0,
@@ -375,42 +379,63 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
         )
 
         log_likelihood = 0.0
+        # Iterate measurements, compute likelihood contributions
         for i, meas in enumerate(measurements):
-            if kf_test.state is None:
-                kf_test.update(meas)
-                continue
+            # Predict step
+            if kf_test.state is not None:
+                state_pred = kf_test.F @ kf_test.state
+                P_pred = kf_test.F @ kf_test.P @ kf_test.F.T + kf_test.Q
 
-            # Predict
-            state_pred = kf_test.F @ kf_test.state
-            P_pred = kf_test.F @ kf_test.P @ kf_test.F.T + kf_test.Q
+                # Innovation
+                y = meas - (kf_test.H @ state_pred)[0]
+                S = (kf_test.H @ P_pred @ kf_test.H.T + kf_test.R)[0, 0]
 
-            # Innovation
-            y = meas - (kf_test.H @ state_pred)[0]
-            S = (kf_test.H @ P_pred @ kf_test.H.T + kf_test.R)[0, 0]
+                # Log-likelihood contribution: -0.5 * (log(S) + y²/S)
+                # (Omit constant term since we're comparing)
+                log_likelihood += -0.5 * (np.log(S + 1e-10) + y**2 / (S + 1e-10))
 
-            # Log-likelihood contribution: -0.5 * (log(S) + y²/S)
-            # (Omit constant term since we're comparing)
-            log_likelihood += -0.5 * (np.log(S + 1e-10) + y**2 / (S + 1e-10))
-
-            # Update
+            # Update step
             kf_test.update(meas)
 
         return log_likelihood
 
-    # Grid search over log-spaced acceleration variance values
-    # Range from very small (maintenance) to larger (active diet/bulk)
-    accel_var_candidates = np.logspace(-8, -2, 25)  # 1e-8 to 1e-2
-    log_likelihoods = [compute_log_likelihood(av) for av in accel_var_candidates]
+    # Coarse grid first
+    accel_var_coarse = np.logspace(-8, -2, 13)  # 1e-8 to 1e-2, 13 points
+    R_coarse = np.logspace(np.log10(0.001), np.log10(0.1), 9)  # 0.001 to 0.1, 9 points
 
-    # Select best candidate
-    best_idx = np.argmax(log_likelihoods)
-    accel_var = accel_var_candidates[best_idx]
+    best_loglike = -np.inf
+    best_accel = R_initial
+    best_R = R_initial
+
+    # Coarse search
+    for av in accel_var_coarse:
+        for rv in R_coarse:
+            ll = compute_log_likelihood(av, rv)
+            if ll > best_loglike:
+                best_loglike = ll
+                best_accel = av
+                best_R = rv
+
+    # Fine search around best coarse solution
+    accel_var_fine = np.logspace(np.log10(best_accel/3), np.log10(best_accel*3), 9)
+    R_fine = np.logspace(np.log10(max(best_R/3, 0.001)), np.log10(min(best_R*3, 0.1)), 9)
+
+    for av in accel_var_fine:
+        for rv in R_fine:
+            ll = compute_log_likelihood(av, rv)
+            if ll > best_loglike:
+                best_loglike = ll
+                best_accel = av
+                best_R = rv
+
+    accel_var = best_accel
+    R_estimate = best_R
 
     print(f"Auto-tuned parameters (robust methods):")
     print(f"  Autocorrelation (ρ): {rho:.3f} [AR(1) regression with intercept]")
     print(f"  AR(1) innovation variance (σ_u²): {noise_var:.3f} kg² [regression residuals]")
-    print(f"  Acceleration variance (σ_a²): {accel_var:.6e} (kg/day²)² [grid search MLE]")
-    print(f"  Measurement noise (R): {R_estimate:.4f} kg² [MAD of differences]")
+    print(f"  Acceleration variance (σ_a²): {accel_var:.6e} (kg/day²)² [2D grid MLE]")
+    print(f"  Measurement noise (R): {R_estimate:.4f} kg² [2D grid MLE]")
 
     return VelocityBodyweightKalmanFilter(
         autocorrelation=rho,
