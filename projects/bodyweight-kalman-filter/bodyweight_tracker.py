@@ -215,7 +215,9 @@ Examples:
     parser.add_argument('--measurement-var', type=float, default=0.5,
                        help='Measurement variance for simple filter (default: 0.5)')
     parser.add_argument('--noise-var', type=float, default=0.3,
-                       help='Noise variance for augmented filter (default: 0.3)')
+                       help='AR(1) innovation variance for augmented filter (default: 0.3)')
+    parser.add_argument('--measurement-noise', type=float, default=0.01,
+                       help='Scale measurement error variance for augmented filter (default: 0.01)')
     parser.add_argument('--no-plot', action='store_true',
                        help='Skip plotting, only show summary')
     parser.add_argument('--csv', type=str,
@@ -256,11 +258,13 @@ Examples:
                 kf = AugmentedBodyweightKalmanFilter(
                     autocorrelation=args.autocorr,
                     process_variance=args.process_var,
-                    noise_variance=args.noise_var
+                    noise_variance=args.noise_var,
+                    measurement_noise=args.measurement_noise
                 )
                 print(f"  Autocorrelation: {args.autocorr}")
                 print(f"  Process variance: {args.process_var}")
-                print(f"  Noise variance: {args.noise_var}")
+                print(f"  AR(1) innovation variance: {args.noise_var}")
+                print(f"  Measurement noise (R): {args.measurement_noise}")
 
             kf.batch_filter(data['weight'].values)
             results = kf.get_results()

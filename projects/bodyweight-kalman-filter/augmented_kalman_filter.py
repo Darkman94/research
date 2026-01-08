@@ -27,6 +27,7 @@ class AugmentedBodyweightKalmanFilter:
                  autocorrelation: float = 0.7,
                  process_variance: float = 1e-5,
                  noise_variance: float = 0.3,
+                 measurement_noise: float = 0.01,
                  initial_estimate: Optional[float] = None,
                  initial_error: float = 1.0,
                  initial_noise: float = 0.0,
@@ -35,10 +36,11 @@ class AugmentedBodyweightKalmanFilter:
         Initialize the augmented Kalman filter.
 
         Args:
-            autocorrelation: ρ, persistence of noise day-to-day (0-1)
-                           0 = iid noise, 0.5 = moderate, 0.7-0.9 = typical for bodyweight
+            autocorrelation: ρ, persistence of noise day-to-day (typical: 0.7-0.9)
             process_variance: How much true weight changes per day (kg²)
-            noise_variance: Variance of new noise each day (kg²)
+            noise_variance: Variance of AR(1) innovations σ_v² (kg²)
+            measurement_noise: Direct measurement error from scale (kg²), default 0.01
+                             (0.1 kg std, protects against one-off bad measurements)
             initial_estimate: Initial true weight estimate (kg)
             initial_error: Initial true weight error (kg²)
             initial_noise: Initial noise level estimate (kg)
@@ -75,8 +77,9 @@ class AugmentedBodyweightKalmanFilter:
         # Measurement matrix: measurement = true_weight + noise
         self.H = np.array([[1.0, 1.0]])
 
-        # Measurement noise variance (should be small since most variance is in state)
-        self.R = np.array([[1e-6]])
+        # Measurement noise variance (scale error, protocol variation)
+        # Typical: 0.01 kg² = 0.1 kg std for good home scales
+        self.R = np.array([[measurement_noise]])
 
         # History
         self.measurements = []
@@ -122,9 +125,9 @@ class AugmentedBodyweightKalmanFilter:
         # Update state
         self.state = state_pred + K.flatten() * y
 
-        # Update covariance
+        # Update covariance using Joseph form (maintains symmetry and PSD)
         I_KH = np.eye(2) - K @ self.H
-        self.P = I_KH @ P_pred
+        self.P = I_KH @ P_pred @ I_KH.T + K @ self.R @ K.T
 
         # Store history
         self.measurements.append(measurement)
@@ -216,9 +219,7 @@ class AugmentedBodyweightKalmanFilter:
                 self.state[1], np.sqrt(self.P[1, 1]))
 
 
-def estimate_autocorrelation(measurements: np.ndarray,
-                             initial_true_weight: Optional[float] = None,
-                             max_lag: int = 7) -> float:
+def estimate_autocorrelation(measurements: np.ndarray) -> float:
     """
     Estimate the autocorrelation coefficient from raw measurements.
 
@@ -229,13 +230,12 @@ def estimate_autocorrelation(measurements: np.ndarray,
 
     Args:
         measurements: Array of bodyweight measurements
-        initial_true_weight: Optional initial weight estimate
-        max_lag: Maximum lag to consider (default 7 days)
 
     Returns:
         Estimated autocorrelation coefficient (ρ)
     """
     if len(measurements) < 10:
+        print("  Warning: Less than 10 measurements, using default ρ=0.7")
         return 0.7  # Default assumption
 
     # Simple detrending: use 7-day moving average as estimate of true weight
@@ -249,18 +249,21 @@ def estimate_autocorrelation(measurements: np.ndarray,
     residuals = measurements - smoothed
 
     # Compute autocorrelation at lag 1
-    n = len(residuals)
-    mean = np.mean(residuals)
     var = np.var(residuals)
 
     if var < 1e-6:
+        print("  Warning: No variance in residuals, using ρ=0.0")
         return 0.0
 
     # Lag-1 autocorrelation
     autocorr = np.corrcoef(residuals[:-1], residuals[1:])[0, 1]
 
-    # Clip to valid range
-    autocorr = np.clip(autocorr, 0.0, 0.95)
+    # Warn if autocorrelation seems unrealistic
+    if autocorr < -0.3:
+        print(f"  Warning: Negative autocorrelation ({autocorr:.3f}) detected - may indicate issues")
+    elif autocorr > 0.95:
+        print(f"  Warning: Very high autocorrelation ({autocorr:.3f}) - clamping to 0.95")
+        autocorr = 0.95
 
     return autocorr
 
@@ -269,32 +272,61 @@ def auto_tune_filter(measurements: np.ndarray) -> AugmentedBodyweightKalmanFilte
     """
     Automatically tune filter parameters from data.
 
+    Estimates parameters for AR(1) noise model:
+    - ρ: autocorrelation coefficient (from lag-1 correlation of residuals)
+    - σ_v²: innovation variance (from variance of differences and ρ)
+
+    For AR(1): n_t = ρ*n_{t-1} + v_t where v_t ~ N(0, σ_v²)
+    Var(n_t - n_{t-1}) = 2*σ_v²/(1+ρ)
+    Therefore: σ_v² = Var(differences) * (1+ρ) / 2
+
     Args:
         measurements: Array of bodyweight measurements
 
     Returns:
         Configured AugmentedBodyweightKalmanFilter
     """
-    # Estimate autocorrelation
+    # Estimate autocorrelation from detrended residuals
     rho = estimate_autocorrelation(measurements)
 
-    # Estimate measurement variance
-    # Use variance of day-to-day changes as proxy
-    daily_changes = np.diff(measurements)
-    noise_var = np.var(daily_changes) / 2  # Divide by 2 for AR(1) process
+    # Estimate innovation variance for AR(1) process
+    # First, detrend to get residuals
+    from scipy.ndimage import uniform_filter1d
+    padded = np.pad(measurements, (3, 3), mode='edge')
+    smoothed = uniform_filter1d(padded, size=7)[3:-3]
+    residuals = measurements - smoothed
+
+    # Variance of residual differences
+    residual_diffs = np.diff(residuals)
+    var_diffs = np.var(residual_diffs)
+
+    # For AR(1): Var(n_t - n_{t-1}) = 2*σ_v²/(1+ρ)
+    # Therefore: σ_v² = Var(diffs) * (1+ρ) / 2
+    noise_var = var_diffs * (1 + rho) / 2
+
+    # Sanity check
+    if noise_var < 0.01:
+        print(f"  Warning: Estimated noise variance very small ({noise_var:.4f}), using 0.1")
+        noise_var = 0.1
 
     # Process variance should be much smaller (true weight changes slowly)
-    process_var = noise_var / 100
+    # Assume true weight changes ~0.1 kg/week = 0.014 kg/day std
+    process_var = 0.0002  # (0.014 kg)²
+
+    # Measurement noise from scale (typical: 0.05-0.15 kg std)
+    measurement_noise = 0.01  # 0.1 kg std
 
     print(f"Auto-tuned parameters:")
     print(f"  Autocorrelation (ρ): {rho:.3f}")
-    print(f"  Noise variance: {noise_var:.3f} kg²")
+    print(f"  Innovation variance (σ_v²): {noise_var:.3f} kg²")
     print(f"  Process variance: {process_var:.6f} kg²")
+    print(f"  Measurement noise (R): {measurement_noise:.4f} kg²")
 
     return AugmentedBodyweightKalmanFilter(
         autocorrelation=rho,
         process_variance=process_var,
         noise_variance=noise_var,
+        measurement_noise=measurement_noise,
         initial_estimate=measurements[0],
         initial_noise=0.0
     )

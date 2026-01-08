@@ -153,10 +153,13 @@ def main():
 
     # Apply augmented Kalman filter (AR model)
     print("Applying augmented Kalman filter (models autocorrelation)...")
+    # For AR(1): stationary variance = σ_v²/(1-ρ²), so σ_v² = σ²(1-ρ²)
+    innovation_var = noise_std**2 * (1 - autocorr**2)
     augmented_kf = AugmentedBodyweightKalmanFilter(
         autocorrelation=autocorr,
         process_variance=1e-5,
-        noise_variance=noise_std**2
+        noise_variance=innovation_var,
+        measurement_noise=0.01  # 0.1 kg scale error
     )
     augmented_kf.batch_filter(measurements)
     augmented_results = augmented_kf.get_results()
