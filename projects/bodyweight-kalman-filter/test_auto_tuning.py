@@ -86,7 +86,7 @@ def main():
     print("="*70)
     print("ROBUST AUTO-TUNING TEST SUITE")
     print("="*70)
-    print("\nTesting AR(1) regression + Empirical Bayes across diet phases")
+    print("\nTesting AR(1) regression + grid search MLE across diet phases")
 
     # Test 1: Maintenance (small velocity)
     rmse1 = test_phase(
@@ -139,9 +139,10 @@ def main():
     print(f"{'='*70}")
     print("\nAll tests completed successfully!")
     print("\nRobust auto-tuning features verified:")
-    print("  ✓ AR(1) regression for ρ estimation")
+    print("  ✓ AR(1) regression with intercept for ρ estimation")
     print("  ✓ Innovation variance from regression residuals")
-    print("  ✓ Empirical Bayes for acceleration variance")
+    print("  ✓ Grid search MLE for acceleration variance")
+    print("  ✓ MAD-based R estimation from data")
     print("  ✓ Works across maintenance, cutting, and bulking phases")
     print("  ✓ Handles different autocorrelation levels")
     print(f"{'='*70}")
