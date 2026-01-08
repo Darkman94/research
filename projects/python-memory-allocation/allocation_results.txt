@@ -1,0 +1,39 @@
+Python Memory Allocation Investigation Results
+====================================================================================================
+
+Python version: 3.11.14 (main, Oct 10 2025, 08:54:04) [GCC 13.3.0]
+Iterations per test: 100,000
+
+Operation                                    Allocs/Iter      Bytes/Iter    Total Allocs
+====================================================================================================
+Dict insertion (growing)                          0.9975           84.35          99,753
+List append (growing)                             0.9975           39.93          99,752
+Integer addition with assignment                  0.0001            0.01              11
+Dict literal creation                             0.0001            0.01              11
+List concatenation                                0.0001            0.00              10
+Dict comprehension (10 items)                     0.0001            0.00              10
+Tuple creation                                    0.0001            0.00              10
+Integer addition (small numbers)                  0.0001            0.01               9
+Large integer addition (>256)                     0.0001            0.01               9
+Small integer creation (0-255)                    0.0001            0.01               9
+Large integer creation (>256)                     0.0001            0.01               9
+String concatenation (small)                      0.0001            0.01               9
+String f-string formatting                        0.0001            0.01               9
+String .format() method                           0.0001            0.01               9
+String % formatting                               0.0001            0.01               9
+String slicing                                    0.0001            0.01               9
+String repetition                                 0.0001            0.01               9
+List comprehension (10 items)                     0.0001            0.00               9
+List slicing                                      0.0001            0.00               9
+List literal creation                             0.0001            0.00               9
+Dict lookup                                       0.0001            0.00               9
+Simple function call                              0.0001            0.00               9
+Function call (3 args)                            0.0001            0.00               9
+Lambda call                                       0.0001            0.00               9
+Method call                                       0.0001            0.00               9
+Simple object creation                            0.0001            0.00               9
+Object creation (with __slots__)                  0.0001            0.00               9
+Set creation                                      0.0001            0.00               9
+If statement evaluation                           0.0001            0.00               9
+Generator expression creation                     0.0001            0.00               9
+Range object creation                             0.0001            0.00               9
