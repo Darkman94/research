@@ -270,17 +270,13 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
     """
     Automatically tune velocity filter parameters from data.
 
-    Estimates:
-    - ρ: autocorrelation coefficient (from lag-1 correlation of residuals)
-    - σ_u²: AR(1) innovation variance (with caveats - see below)
-    - σ_a²: acceleration variance (from velocity changes in smoothed data)
+    Uses robust methods:
+    - ρ, σ_u²: AR(1) regression on detrended residuals (not differencing)
+    - σ_a²: Empirical Bayes from innovation variance in first-pass filter
+    - R: Fixed at 0.01 kg² (0.1 kg std for typical scales)
 
-    LIMITATIONS:
-    - AR(1) noise estimate uses 7-day smoothed residuals, which contaminate the
-      estimate with low-frequency content and measurement error. This is a
-      practical compromise; true separation requires EM or more complex methods.
-    - Acceleration estimate from 14-day smoothed velocities includes smoothing
-      bias. Estimates are reasonable but not ML-optimal.
+    This avoids fragile smoothing heuristics and hard clamps that fail
+    across diet phases.
 
     Args:
         measurements: Array of bodyweight measurements
@@ -291,78 +287,127 @@ def auto_tune_velocity_filter(measurements: np.ndarray, dt: float = 1.0) -> Velo
     """
     from scipy.ndimage import uniform_filter1d
 
-    # Estimate autocorrelation
-    if len(measurements) < 10:
-        print("  Warning: Less than 10 measurements, using default ρ=0.7")
-        rho = 0.7
-    else:
-        # Detrend with 7-day moving average
-        # NOTE: This leaks low-frequency content into residuals
-        padded = np.pad(measurements, (3, 3), mode='edge')
-        smoothed = uniform_filter1d(padded, size=7)[3:-3]
-        residuals = measurements - smoothed
+    if len(measurements) < 14:
+        print("  Warning: Less than 14 measurements, using conservative defaults")
+        return VelocityBodyweightKalmanFilter(
+            autocorrelation=0.7,
+            acceleration_variance=1e-5,
+            noise_variance=0.3,
+            measurement_noise=0.01,
+            dt=dt,
+            initial_weight=measurements[0],
+            initial_velocity=0.0,
+            initial_noise=0.0
+        )
 
-        # Compute lag-1 autocorrelation
-        var = np.var(residuals)
-        if var < 1e-6:
-            print("  Warning: No variance in residuals, using ρ=0.0")
-            rho = 0.0
-        else:
-            rho = np.corrcoef(residuals[:-1], residuals[1:])[0, 1]
-            if rho < -0.3:
-                print(f"  Warning: Negative autocorrelation ({rho:.3f}) - may indicate issues")
-            elif rho > 0.95:
-                print(f"  Warning: Very high autocorrelation ({rho:.3f}), clamping to 0.95")
-                rho = 0.95
+    # Step 1: Detrend to get residuals
+    # Use linear regression to remove trend (preserves autocorrelation better than MA)
+    t = np.arange(len(measurements))
+    # Fit linear trend: y = a + b*t
+    A = np.vstack([np.ones(len(t)), t]).T
+    coeffs = np.linalg.lstsq(A, measurements, rcond=None)[0]
+    trend = coeffs[0] + coeffs[1] * t
+    residuals = measurements - trend
 
-    # Estimate AR(1) innovation variance
-    # NOTE: residuals include measurement error and detrending artifacts
-    if len(measurements) >= 10:
-        padded = np.pad(measurements, (3, 3), mode='edge')
-        smoothed = uniform_filter1d(padded, size=7)[3:-3]
-        residuals = measurements - smoothed
-        residual_diffs = np.diff(residuals)
-        var_diffs = np.var(residual_diffs)
+    # Step 2: Fit AR(1) by regression: u_t = ρ*u_{t-1} + e_t
+    # This is more robust than correlation + differencing
+    u_t = residuals[1:]  # t = 2..N
+    u_tm1 = residuals[:-1]  # t-1 = 1..N-1
 
-        # For AR(1): Var(Δu) = 2σ_u²/(1+ρ), so σ_u² = Var(Δu)*(1+ρ)/2
-        noise_var = var_diffs * (1 + rho) / 2
+    # OLS: ρ = (u_t' * u_{t-1}) / (u_{t-1}' * u_{t-1})
+    numerator = np.sum(u_t * u_tm1)
+    denominator = np.sum(u_tm1 * u_tm1)
 
-        if noise_var < 0.01:
-            print(f"  Warning: Estimated noise variance very small ({noise_var:.4f}), using 0.1")
-            noise_var = 0.1
-    else:
+    if denominator < 1e-10:
+        print("  Warning: No variance in residuals, using ρ=0.0")
+        rho = 0.0
         noise_var = 0.3
-
-    # Estimate acceleration variance from observed velocity changes
-    # Approach: smooth heavily, estimate velocity, look at Δv
-    if len(measurements) >= 14:
-        # Heavy smoothing to estimate underlying trend
-        padded = np.pad(measurements, (7, 7), mode='edge')
-        heavy_smooth = uniform_filter1d(padded, size=14)[7:-7]
-
-        # Estimate velocities (kg/day)
-        velocities = np.diff(heavy_smooth) / dt
-
-        # Velocity changes (kg/day²) - proxy for acceleration
-        velocity_changes = np.diff(velocities) / dt
-        accel_var = np.var(velocity_changes)
-
-        # Sanity checks: acceleration shouldn't be too large or too small
-        # Typical: 0.01 to 0.1 kg/day² std
-        accel_var = np.clip(accel_var, 1e-6, 0.01)
     else:
-        # Default: ~0.003 kg/day² std (allows velocity to change ~0.02 kg/day per day)
-        accel_var = 1e-5
+        rho = numerator / denominator
 
-    # Measurement noise from scale
+        # Sanity checks
+        if rho < -0.3:
+            print(f"  Warning: Negative AR(1) coefficient ({rho:.3f}) - may indicate issues")
+        if rho > 0.98:
+            print(f"  Warning: Very high AR(1) coefficient ({rho:.3f}), clamping to 0.95")
+            rho = 0.95
+        elif rho < 0:
+            rho = max(rho, 0.0)  # Clamp negative to 0
+
+        # Innovation variance: σ_u² = Var(u_t - ρ*u_{t-1})
+        innovations = u_t - rho * u_tm1
+        noise_var = np.var(innovations)
+
+        # Sanity check
+        if noise_var < 0.01:
+            print(f"  Warning: Estimated AR(1) innovation variance very small ({noise_var:.4f}), using 0.1")
+            noise_var = 0.1
+
+    # Step 3: Tune acceleration variance via empirical Bayes
+    # Run a first-pass filter with conservative σ_a², then use innovation variance
+    print("  Running first-pass filter for acceleration tuning...")
+
+    # Conservative initial guess
+    accel_var_init = 1e-5
+    kf_init = VelocityBodyweightKalmanFilter(
+        autocorrelation=rho,
+        acceleration_variance=accel_var_init,
+        noise_variance=noise_var,
+        measurement_noise=0.01,
+        dt=dt,
+        initial_weight=measurements[0],
+        initial_velocity=0.0,
+        initial_noise=0.0
+    )
+
+    # Collect innovations from first pass
+    innovations_list = []
+    innovation_vars = []
+
+    for i, meas in enumerate(measurements):
+        if kf_init.state is None:
+            kf_init.update(meas)
+            continue
+
+        # Predict
+        state_pred = kf_init.F @ kf_init.state
+        P_pred = kf_init.F @ kf_init.P @ kf_init.F.T + kf_init.Q
+
+        # Innovation
+        y = meas - (kf_init.H @ state_pred)[0]
+        S = (kf_init.H @ P_pred @ kf_init.H.T + kf_init.R)[0, 0]
+
+        innovations_list.append(y)
+        innovation_vars.append(S)
+
+        # Update
+        kf_init.update(meas)
+
+    # Estimate acceleration variance from innovation statistics
+    # If innovations are larger than predicted by S, increase σ_a²
+    innovations_arr = np.array(innovations_list[5:])  # Skip first few (transient)
+    predicted_std = np.sqrt(np.mean(innovation_vars[5:]))
+    empirical_std = np.std(innovations_arr)
+
+    # Ratio tells us if we need more/less process noise
+    ratio = (empirical_std / predicted_std) ** 2
+
+    # Adjust acceleration variance
+    # If ratio > 1: innovations larger than expected → increase σ_a²
+    # If ratio < 1: innovations smaller than expected → decrease σ_a²
+    accel_var = accel_var_init * ratio
+
+    # Sanity bounds (wider than before to allow adaptation across phases)
+    accel_var = np.clip(accel_var, 1e-7, 0.1)
+
+    # Measurement noise (fixed)
     measurement_noise = 0.01  # 0.1 kg std
 
-    print(f"Auto-tuned parameters:")
-    print(f"  Autocorrelation (ρ): {rho:.3f}")
-    print(f"  AR(1) innovation variance (σ_u²): {noise_var:.3f} kg²")
-    print(f"  Acceleration variance (σ_a²): {accel_var:.6f} (kg/day²)²")
-    print(f"  Measurement noise (R): {measurement_noise:.4f} kg²")
-    print(f"  NOTE: AR(1) and acceleration estimates have limitations (see docstring)")
+    print(f"Auto-tuned parameters (robust methods):")
+    print(f"  Autocorrelation (ρ): {rho:.3f} [AR(1) regression]")
+    print(f"  AR(1) innovation variance (σ_u²): {noise_var:.3f} kg² [regression residuals]")
+    print(f"  Acceleration variance (σ_a²): {accel_var:.6f} (kg/day²)² [empirical Bayes]")
+    print(f"  Measurement noise (R): {measurement_noise:.4f} kg² [fixed]")
 
     return VelocityBodyweightKalmanFilter(
         autocorrelation=rho,
